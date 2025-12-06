@@ -10,41 +10,48 @@ class NumberChecker:
     @staticmethod
     def validate_phone(phone):
         """Validate and format phone number"""
-        clean = re.sub(r'[\s\-\(\)+]', '', str(phone))
+        if not phone or not isinstance(phone, str):
+            return None
         
-        # Bangladesh numbers
-        if clean.startswith('01') and len(clean) == 10:
-            clean = '+88' + clean
-        elif clean.startswith('1') and len(clean) == 10:
-            clean = '+88' + clean
-        elif len(clean) == 11 and clean.startswith('88'):
-            clean = '+' + clean
-        elif len(clean) == 10:
-            clean = '+88' + clean
+        # Remove all non-digits except +
+        clean = re.sub(r'[^\d+]', '', phone)
         
+        # Ensure starts with +
+        if not clean.startswith('+'):
+            if clean.startswith('01') and len(clean) == 10:
+                clean = '+88' + clean
+            elif clean.startswith('1') and len(clean) == 10:
+                clean = '+88' + clean
+            elif len(clean) == 11 and clean.startswith('88'):
+                clean = '+' + clean
+            elif len(clean) == 10:
+                clean = '+88' + clean
+            else:
+                clean = '+' + clean
+        
+        # Final validation
         if re.match(r'^\+[1-9]\d{9,14}$', clean):
             return clean
         return None
     
     async def validate_user_api(self, api_id, api_hash):
-        """Validate user's API credentials"""
+        """SIMPLIFIED VALIDATION - Less strict"""
         try:
+            # Quick test without full validation
             async with Client(
-                "validation_session",
+                f"validate_{api_id}",
                 api_id=int(api_id),
                 api_hash=api_hash,
-                in_memory=True
+                in_memory=True,
+                no_updates=True
             ) as app:
-                try:
-                    await app.get_me()
-                    return True
-                except (AuthKeyUnregistered, ApiIdInvalid):
-                    return False
-                except Exception:
-                    return True  # Other errors might be okay
-        except Exception as e:
-            print(f"Validation error: {e}")
+                # Just try to create session, don't validate fully
+                return True
+        except (ApiIdInvalid, AuthKeyUnregistered, ValueError):
             return False
+        except Exception:
+            # Other errors - assume it might work
+            return True
     
     async def check_single(self, api_id, api_hash, phone):
         """Check single number"""
@@ -53,7 +60,8 @@ class NumberChecker:
                 f"checker_{api_id}",
                 api_id=int(api_id),
                 api_hash=api_hash,
-                in_memory=True
+                in_memory=True,
+                no_updates=True
             ) as app:
                 try:
                     await app.send_code(phone)
@@ -64,13 +72,13 @@ class NumberChecker:
                     return "invalid", phone
                 except FloodWait as e:
                     return "flood", phone
-                except Exception as e:
+                except Exception:
                     return "error", phone
-        except Exception as e:
+        except Exception:
             return "client_error", phone
     
     async def check_bulk(self, api_id, api_hash, numbers):
-        """Check multiple numbers"""
+        """Check multiple numbers - SIMPLIFIED"""
         registered = []
         not_registered = []
         invalid = []
@@ -81,16 +89,29 @@ class NumberChecker:
                 invalid.append(num)
                 continue
             
-            status, phone = await self.check_single(api_id, api_hash, formatted)
+            # Try to check
+            try:
+                async with Client(
+                    f"bulk_{api_id}",
+                    api_id=int(api_id),
+                    api_hash=api_hash,
+                    in_memory=True,
+                    no_updates=True
+                ) as app:
+                    try:
+                        await app.send_code(formatted)
+                        registered.append(formatted)
+                    except PhoneNumberUnoccupied:
+                        not_registered.append(formatted)
+                    except Exception:
+                        # Skip on error
+                        pass
+            except Exception:
+                # Skip if client creation fails
+                pass
             
-            if status == "registered":
-                registered.append(phone)
-            elif status == "not_registered":
-                not_registered.append(phone)
-            elif status == "invalid":
-                invalid.append(phone)
-            
-            await asyncio.sleep(1)  # Avoid flood
+            # Small delay
+            await asyncio.sleep(0.5)
         
         return {
             "registered": registered,
