@@ -4,24 +4,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # Bot Credentials (MUST HAVE ALL THREE)
-    API_ID = int(os.getenv("API_ID", 0))          # From my.telegram.org
-    API_HASH = os.getenv("API_HASH", "")          # From my.telegram.org
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")        # From @BotFather
+    # These THREE are required for the BOT itself
+    API_ID = int(os.getenv("API_ID", 0))
+    API_HASH = os.getenv("API_HASH", "")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     
-    # Validation
-    @classmethod
-    def validate(cls):
-        missing = []
-        if not cls.API_ID:
-            missing.append("API_ID")
-        if not cls.API_HASH:
-            missing.append("API_HASH")
-        if not cls.BOT_TOKEN:
-            missing.append("BOT_TOKEN")
-        
-        if missing:
-            print(f"❌ Missing environment variables: {', '.join(missing)}")
-            print("Please set them in .env file")
-            return False
-        return True
+    @staticmethod
+    def check():
+        if not Config.API_ID:
+            return False, "API_ID missing in .env file"
+        if not Config.API_HASH:
+            return False, "API_HASH missing in .env file"
+        if not Config.BOT_TOKEN:
+            return False, "BOT_TOKEN missing in .env file"
+        return True, "All credentials are set"
