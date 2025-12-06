@@ -15,5 +15,7 @@ services:
         sync: false
       - key: BOT_TOKEN
         sync: false
+      - key: PORT
+        value: 8080
     healthCheckPath: /health
     autoDeploy: true
