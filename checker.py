@@ -6,121 +6,96 @@ from pyrogram.errors import (
     FloodWait, ApiIdInvalid, AuthKeyUnregistered
 )
 
-class TelegramChecker:
-    def __init__(self):
-        self.active_clients = {}
-    
-    def validate_phone(self, phone):
-        """Validate phone number format"""
-        # Clean number
-        clean = re.sub(r'[\s\-\(\)]', '', str(phone))
+class NumberChecker:
+    @staticmethod
+    def validate_phone(phone):
+        """Validate and format phone number"""
+        clean = re.sub(r'[\s\-\(\)+]', '', str(phone))
         
-        # Bangladesh format support
+        # Bangladesh numbers
         if clean.startswith('01') and len(clean) == 10:
             clean = '+88' + clean
         elif clean.startswith('1') and len(clean) == 10:
             clean = '+88' + clean
-        elif not clean.startswith('+') and len(clean) == 11 and clean.startswith('88'):
+        elif len(clean) == 11 and clean.startswith('88'):
             clean = '+' + clean
+        elif len(clean) == 10:
+            clean = '+88' + clean
         
-        # International validation
-        if re.match(r'^\+[1-9]\d{1,14}$', clean):
+        if re.match(r'^\+[1-9]\d{9,14}$', clean):
             return clean
         return None
     
-    async def validate_user_credentials(self, api_id, api_hash):
-        """Validate user-provided API credentials"""
+    async def validate_user_api(self, api_id, api_hash):
+        """Validate user's API credentials"""
         try:
-            test_client = Client(
-                f"validate_{api_id}",
+            async with Client(
+                "validation_session",
                 api_id=int(api_id),
                 api_hash=api_hash,
-                in_memory=True,
-                no_updates=True
-            )
-            
-            async with test_client:
-                # Try to get own info
+                in_memory=True
+            ) as app:
                 try:
-                    await test_client.get_me()
+                    await app.get_me()
                     return True
                 except (AuthKeyUnregistered, ApiIdInvalid):
                     return False
                 except Exception:
-                    # Other errors might mean credentials are valid
-                    return True
-                    
-        except Exception:
+                    return True  # Other errors might be okay
+        except Exception as e:
+            print(f"Validation error: {e}")
             return False
     
-    async def check_single_number(self, user_api_id, user_api_hash, phone_number):
-        """Check if a phone number has Telegram account"""
-        client_key = f"user_{user_api_id}"
-        
+    async def check_single(self, api_id, api_hash, phone):
+        """Check single number"""
         try:
-            # Create client with user's credentials
             async with Client(
-                client_key,
-                api_id=int(user_api_id),
-                api_hash=user_api_hash,
-                in_memory=True,
-                no_updates=True
-            ) as client:
-                
-                # Try to send code
+                f"checker_{api_id}",
+                api_id=int(api_id),
+                api_hash=api_hash,
+                in_memory=True
+            ) as app:
                 try:
-                    await client.send_code(phone_number)
-                    return {"status": "registered", "phone": phone_number}
+                    await app.send_code(phone)
+                    return "registered", phone
                 except PhoneNumberUnoccupied:
-                    return {"status": "not_registered", "phone": phone_number}
+                    return "not_registered", phone
                 except PhoneNumberInvalid:
-                    return {"status": "invalid", "phone": phone_number}
+                    return "invalid", phone
                 except FloodWait as e:
-                    return {"status": "flood", "phone": phone_number, "wait": e.value}
+                    return "flood", phone
                 except Exception as e:
-                    return {"status": "error", "phone": phone_number, "error": str(e)}
-                    
+                    return "error", phone
         except Exception as e:
-            return {"status": "client_error", "phone": phone_number, "error": str(e)}
+            return "client_error", phone
     
-    async def check_numbers(self, user_api_id, user_api_hash, phone_list):
+    async def check_bulk(self, api_id, api_hash, numbers):
         """Check multiple numbers"""
-        results = {
-            "registered": [],
-            "not_registered": [],
-            "invalid_format": [],
-            "errors": []
-        }
+        registered = []
+        not_registered = []
+        invalid = []
         
-        total = len(phone_list)
-        
-        for index, phone in enumerate(phone_list):
-            # Validate format
-            validated_phone = self.validate_phone(phone)
-            if not validated_phone:
-                results["invalid_format"].append(phone)
+        for num in numbers:
+            formatted = self.validate_phone(num)
+            if not formatted:
+                invalid.append(num)
                 continue
             
-            # Check number
-            result = await self.check_single_number(user_api_id, user_api_hash, validated_phone)
+            status, phone = await self.check_single(api_id, api_hash, formatted)
             
-            if result["status"] == "registered":
-                results["registered"].append(validated_phone)
-            elif result["status"] == "not_registered":
-                results["not_registered"].append(validated_phone)
-            elif result["status"] == "invalid":
-                results["invalid_format"].append(validated_phone)
-            else:
-                results["errors"].append({
-                    "phone": validated_phone,
-                    "error": result.get("error", "Unknown")
-                })
+            if status == "registered":
+                registered.append(phone)
+            elif status == "not_registered":
+                not_registered.append(phone)
+            elif status == "invalid":
+                invalid.append(phone)
             
-            # Delay to avoid flood (1.5 seconds between checks)
-            if index < total - 1:
-                await asyncio.sleep(1.5)
+            await asyncio.sleep(1)  # Avoid flood
         
-        return results
+        return {
+            "registered": registered,
+            "not_registered": not_registered,
+            "invalid": invalid
+        }
 
-# Global instance
-checker = TelegramChecker()
+checker = NumberChecker()
