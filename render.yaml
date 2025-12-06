@@ -3,7 +3,10 @@ services:
     name: telegram-checker-bot
     env: python
     region: singapore
-    buildCommand: pip install -r requirements.txt
+    plan: free
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: API_ID
