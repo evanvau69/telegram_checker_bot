@@ -2,207 +2,286 @@ import os
 import re
 import asyncio
 from datetime import datetime
-from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 
+from config import Config
 from checker import checker
 
-# Load environment
-load_dotenv()
-
-# Bot configuration - ONLY NEED BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    print("❌ ERROR: BOT_TOKEN not found in .env file!")
-    print("Please create a .env file with BOT_TOKEN=your_token_here")
+# Validate configuration
+if not Config.validate():
     exit(1)
 
-# Initialize bot
-app = Client(
-    "telegram_number_checker",
-    bot_token=BOT_TOKEN
+# Initialize Bot Client
+bot = Client(
+    "telegram_checker_bot",
+    api_id=Config.API_ID,      # Bot's own API_ID
+    api_hash=Config.API_HASH,  # Bot's own API_HASH
+    bot_token=Config.BOT_TOKEN,
+    parse_mode=enums.ParseMode.MARKDOWN
 )
 
-# User states storage (in-memory, simple)
-user_states = {}
+# User session storage
+user_sessions = {}
 
 def extract_numbers(text):
     """Extract phone numbers from text"""
-    numbers = []
+    # Split by multiple delimiters
+    delimiters = [',', '\n', ' ', ';', '|', '\t']
     
-    # Split by common delimiters
-    for delim in [',', '\n', ' ', ';', '|']:
+    for delim in delimiters:
         if delim in text:
-            parts = [p.strip() for p in text.split(delim) if p.strip()]
-            numbers.extend(parts)
-            break
-    else:
-        numbers.append(text.strip())
+            numbers = [num.strip() for num in text.split(delim) if num.strip()]
+            if len(numbers) > 1:
+                return numbers
     
-    return numbers
+    # If no delimiter found, return as single item list
+    return [text.strip()] if text.strip() else []
+
+def create_contact_button():
+    """Create contact developer button"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Contact Developer 🙎‍♂️", url="https://t.me/Mr_Evan3490")
+    ]])
 
 def format_results(results):
-    """Format results with emojis"""
+    """Format checking results"""
     response = ""
     
+    # Registered numbers
     if results["registered"]:
-        response += "**✅ Account খোলা আছে:**\n"
-        for num in results["registered"][:30]:  # Limit display
+        response += "**✅ ACCOUNT খোলা আছে:**\n"
+        for num in results["registered"][:25]:  # Show first 25
             response += f"✅ `{num}`\n"
-        if len(results["registered"]) > 30:
-            response += f"✅ ... এবং আরও {len(results['registered']) - 30} টি\n"
+        if len(results["registered"]) > 25:
+            response += f"✅ ... এবং আরও {len(results['registered']) - 25} টি\n"
         response += "\n"
     
+    # Not registered numbers
     if results["not_registered"]:
-        response += "**🔒 Account খোলা নেই:**\n"
-        for num in results["not_registered"][:30]:
+        response += "**🔒 ACCOUNT খোলা নেই:**\n"
+        for num in results["not_registered"][:25]:
             response += f"🔒 `{num}`\n"
-        if len(results["not_registered"]) > 30:
-            response += f"🔒 ... এবং আরও {len(results['not_registered']) - 30} টি\n"
+        if len(results["not_registered"]) > 25:
+            response += f"🔒 ... এবং আরও {len(results['not_registered']) - 25} টি\n"
+        response += "\n"
+    
+    # Invalid format numbers
+    if results["invalid_format"]:
+        response += f"**⚠️ ভুল ফরম্যাট ({len(results['invalid_format'])} টি):**\n"
+        response += "এই নাম্বারগুলো ভুল ফরম্যাটে দেওয়া হয়েছে\n\n"
+    
+    # Errors
+    if results["errors"]:
+        response += f"**❌ Errors ({len(results['errors'])}):**\n"
+        for err in results["errors"][:5]:
+            response += f"• `{err['phone']}` - {err['error'][:50]}\n"
         response += "\n"
     
     # Summary
     total_checked = len(results["registered"]) + len(results["not_registered"])
-    response += f"**📊 সারাংশ:**\n"
-    response += f"• মোট চেকড: {total_checked} টি\n"
+    response += "**📊 সারাংশ:**\n"
+    response += f"• মোট চেক করা: {total_checked} টি নাম্বার\n"
     response += f"• ✅ খোলা: {len(results['registered'])} টি\n"
     response += f"• 🔒 বন্ধ: {len(results['not_registered'])} টি\n"
     
-    if results["invalid"]:
-        response += f"• ⚠️ ভুল ফরম্যাট: {len(results['invalid'])} টি\n"
+    if results["invalid_format"]:
+        response += f"• ⚠️ ভুল ফরম্যাট: {len(results['invalid_format'])} টি\n"
     
     return response
 
-# Start command
-@app.on_message(filters.command("start"))
-async def start_handler(client: Client, message: Message):
+# ==================== COMMAND HANDLERS ====================
+
+@bot.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
     user_id = message.from_user.id
     
-    # Reset user state
-    user_states[user_id] = {"step": "idle"}
+    # Initialize user session
+    user_sessions[user_id] = {
+        "step": "waiting_api_id",
+        "api_id": None,
+        "api_hash": None
+    }
     
     welcome_text = (
         "👋 **Telegram Number Checker Bot**\n\n"
-        "এই বট দিয়ে আপনি যেকোনো টেলিগ্রাম নাম্বার চেক করতে পারবেন।\n\n"
-        "**কিভাবে ব্যবহার করবেন:**\n"
-        "1. আপনার **API_ID** দিন (my.telegram.org থেকে)\n"
-        "2. আপনার **API_HASH** দিন\n"
-        "3. নাম্বার লিস্ট দিন চেক করার জন্য\n\n"
-        "**এখন প্রথম ধাপ:**\n"
-        "আপনার **API_ID** দিন (6-7 ডিজিটের সংখ্যা):"
+        "📌 **এই বট দিয়ে আপনি যেকোনো নাম্বার চেক করতে পারবেন:**\n"
+        "• নাম্বারে টেলিগ্রাম অ্যাকাউন্ট আছে কিনা\n"
+        "• একসাথে অনেকগুলো নাম্বার চেক করুন\n"
+        "• বাংলাদেশী ফরম্যাট সাপোর্ট\n\n"
+        "🔑 **প্রথমে আপনার API Credentials দিন:**\n\n"
+        "**ধাপ ১:** আপনার **API_ID** দিন\n"
+        "(6-7 ডিজিটের সংখ্যা, my.telegram.org থেকে)\n\n"
+        "👉 **API_ID** লিখুন:"
     )
     
-    # Set state to wait for API_ID
-    user_states[user_id] = {"step": "waiting_api_id"}
-    
-    contact_button = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Contact Developer 🙎‍♂️", url="https://t.me/Mr_Evan3490")
-    ]])
-    
-    await message.reply_text(welcome_text, reply_markup=contact_button)
+    await message.reply_text(welcome_text, reply_markup=create_contact_button())
 
-# Handle all messages
-@app.on_message(filters.text & filters.private)
-async def message_handler(client: Client, message: Message):
+@bot.on_message(filters.command("help"))
+async def help_command(client: Client, message: Message):
+    help_text = (
+        "🆘 **সাহায্য - Telegram Number Checker Bot**\n\n"
+        "**কমান্ডস:**\n"
+        "• /start - বট শুরু করুন\n"
+        "• /help - সাহায্য দেখুন\n"
+        "• /new - নতুন API credentials দিয়ে শুরু করুন\n"
+        "• /cancel - বর্তমান প্রক্রিয়া বাতিল করুন\n\n"
+        "**API Credentials পাওয়ার উপায়:**\n"
+        "1. https://my.telegram.org/auth এ যান\n"
+        "2. লগইন করুন (ফোন নাম্বার + কোড)\n"
+        "3. **API Development Tools** এ ক্লিক করুন\n"
+        "4. App তৈরি করুন\n"
+        "5. **App ID (API_ID)** এবং **App Hash (API_HASH)** পাবেন\n\n"
+        "**নাম্বার ফরম্যাট:**\n"
+        "• `+8801712345678` (আন্তর্জাতিক)\n"
+        "• `8801712345678`\n"
+        "• `01712345678` (বাংলাদেশ)\n"
+        "• কমা, স্পেস বা নতুন লাইনে আলাদা করুন\n\n"
+        "**লিমিট:** একবারে সর্বোচ্চ ৫০ নাম্বার\n\n"
+        "📞 **সমস্যা হলে Contact করুন:**"
+    )
+    
+    await message.reply_text(help_text, reply_markup=create_contact_button())
+
+@bot.on_message(filters.command("new"))
+async def new_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_sessions[user_id] = {
+        "step": "waiting_api_id",
+        "api_id": None,
+        "api_hash": None
+    }
+    
+    await message.reply_text(
+        "🔄 **নতুন API Credentials দিয়ে শুরু করুন**\n\n"
+        "👉 আপনার **API_ID** দিন:"
+    )
+
+@bot.on_message(filters.command("cancel"))
+async def cancel_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id in user_sessions:
+        user_sessions[user_id] = {
+            "step": "waiting_api_id",
+            "api_id": None,
+            "api_hash": None
+        }
+    
+    await message.reply_text(
+        "🗑️ **বর্তমান প্রক্রিয়া বাতিল করা হয়েছে।**\n\n"
+        "নতুন করে শুরু করতে /start লিখুন।"
+    )
+
+# ==================== MESSAGE HANDLER ====================
+
+@bot.on_message(filters.text & filters.private)
+async def handle_message(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # Skip commands
+    # Ignore commands
     if text.startswith('/'):
         return
     
-    # Initialize user state if not exists
-    if user_id not in user_states:
-        user_states[user_id] = {"step": "idle"}
+    # Initialize session if not exists
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "step": "waiting_api_id",
+            "api_id": None,
+            "api_hash": None
+        }
     
-    current_state = user_states[user_id].get("step", "idle")
+    session = user_sessions[user_id]
+    current_step = session["step"]
     
     # Step 1: Waiting for API_ID
-    if current_state == "waiting_api_id":
+    if current_step == "waiting_api_id":
         # Validate API_ID format
         if not re.match(r'^\d{6,7}$', text):
             await message.reply_text(
-                "❌ **ভুল API_ID!**\n"
+                "❌ **ভুল API_ID ফরম্যাট!**\n\n"
                 "API_ID 6-7 ডিজিটের সংখ্যা হয়।\n"
                 "**উদাহরণ:** `1234567`\n\n"
-                "আবার API_ID দিন:"
+                "👉 **সঠিক API_ID দিন:**"
             )
             return
         
-        # Save API_ID
-        user_states[user_id]["api_id"] = text
-        user_states[user_id]["step"] = "waiting_api_hash"
+        session["api_id"] = text
+        session["step"] = "waiting_api_hash"
         
         await message.reply_text(
-            "✅ **API_ID সংরক্ষিত!**\n\n"
-            "**দ্বিতীয় ধাপ:**\n"
-            "এখন আপনার **API_HASH** দিন (32 character hex):\n\n"
-            "**উদাহরণ:** `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`"
+            "✅ **API_ID সংরক্ষিত হয়েছে!**\n\n"
+            "**ধাপ ২:** এখন আপনার **API_HASH** দিন\n"
+            "(32 character এর hex string)\n\n"
+            "**উদাহরণ:** `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`\n\n"
+            "👉 **API_HASH লিখুন:**"
         )
     
     # Step 2: Waiting for API_HASH
-    elif current_state == "waiting_api_hash":
+    elif current_step == "waiting_api_hash":
         # Validate API_HASH format
         if not re.match(r'^[a-f0-9]{32}$', text.lower()):
             await message.reply_text(
-                "❌ **ভুল API_HASH!**\n"
+                "❌ **ভুল API_HASH ফরম্যাট!**\n\n"
                 "API_HASH 32 character এর hex string হয়।\n"
+                "সব letters lowercase এ লিখুন।\n\n"
                 "**উদাহরণ:** `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`\n\n"
-                "আবার API_HASH দিন:"
+                "👉 **সঠিক API_HASH দিন:**"
             )
             return
         
-        # Get API_ID from state
-        api_id = user_states[user_id].get("api_id")
-        if not api_id:
-            await message.reply_text("❌ **ত্রুটি!** /start লিখে আবার শুরু করুন।")
-            user_states[user_id] = {"step": "idle"}
-            return
+        api_id = session["api_id"]
         
         # Validate credentials
-        validating_msg = await message.reply_text("🔍 **API Credentials চেক করা হচ্ছে...**")
+        validating_msg = await message.reply_text(
+            "🔍 **API Credentials validate করা হচ্ছে...**\n"
+            "⏳ কয়েক সেকেন্ড সময় নিতে পারে..."
+        )
         
-        is_valid = await checker.validate_api_credentials(api_id, text)
+        is_valid = await checker.validate_user_credentials(api_id, text)
         
         if not is_valid:
             await validating_msg.edit_text(
-                "❌ **API Credentials ভুল বা কাজ করছে না!**\n\n"
-                "আপনি যে API_ID এবং Hash দিয়েছেন তা সঠিক নয়।\n"
-                "দয়া করে নতুন করে শুরু করুন:\n\n"
-                "আপনার **API_ID** দিন:"
+                "❌ **API Credentials ভুল বা অচল!**\n\n"
+                "আপনার দেওয়া API_ID এবং API_HASH কাজ করছে না।\n"
+                "দয়া করে নিশ্চিত করুন:\n"
+                "1. my.telegram.org থেকে সঠিক credentials নিয়েছেন\n"
+                "2. credentials সঠিকভাবে কপি করেছেন\n\n"
+                "👉 **নতুন API_ID দিয়ে শুরু করুন:**"
             )
-            user_states[user_id] = {"step": "waiting_api_id"}
+            session["step"] = "waiting_api_id"
+            session["api_id"] = None
             return
         
         # Save valid credentials
-        user_states[user_id]["api_hash"] = text
-        user_states[user_id]["step"] = "ready_for_numbers"
-        user_states[user_id]["credentials_valid"] = True
+        session["api_hash"] = text
+        session["step"] = "ready_for_numbers"
+        session["is_valid"] = True
         
         await validating_msg.edit_text(
             "🎉 **CONGRATULATION** 🎉\n\n"
             "✅ **আপনার API Credentials সফলভাবে verify হয়েছে!**\n\n"
             "**এখন আপনার নাম্বার লিস্ট দিন:**\n\n"
             "**ফরম্যাট:**\n"
-            "• `+8801712345678`\n"
-            "• `+8801712345678, +8801812345678`\n"
-            "• `+8801712345678 +8801812345678`\n"
-            "• নতুন লাইনে আলাদা করেও দিতে পারেন\n\n"
-            "**লিমিট:** একবারে সর্বোচ্চ 100 টি নাম্বার"
+            "• একক নাম্বার: `+8801712345678`\n"
+            "• একাধিক নাম্বার: `+8801712345678, +8801812345678`\n"
+            "• স্পেস দিয়ে: `+8801712345678 +8801812345678`\n"
+            "• নতুন লাইনে: এক লাইনে একটি নাম্বার\n\n"
+            "**লিমিট:** একবারে সর্বোচ্চ ৫০ টি নাম্বার\n\n"
+            "👉 **নাম্বার লিস্ট পাঠান:**"
         )
     
     # Step 3: Ready for numbers
-    elif current_state == "ready_for_numbers":
-        # Get credentials from state
-        api_id = user_states[user_id].get("api_id")
-        api_hash = user_states[user_id].get("api_hash")
+    elif current_step == "ready_for_numbers":
+        api_id = session.get("api_id")
+        api_hash = session.get("api_hash")
         
         if not api_id or not api_hash:
-            await message.reply_text("❌ **Credentials পাওয়া যায়নি!** /start লিখে আবার শুরু করুন।")
-            user_states[user_id] = {"step": "idle"}
+            await message.reply_text(
+                "❌ **Credentials পাওয়া যায়নি!**\n"
+                "/start লিখে নতুন করে শুরু করুন।"
+            )
             return
         
         # Extract numbers
@@ -211,135 +290,95 @@ async def message_handler(client: Client, message: Message):
         if not phone_list:
             await message.reply_text(
                 "❌ **কোনো নাম্বার পাওয়া যায়নি!**\n\n"
-                "দয়া করে ফোন নাম্বারগুলো ঠিকভাবে দিন।\n"
-                "**উদাহরণ:** `+8801712345678, +8801812345678`"
+                "দয়া করে নাম্বারগুলো ঠিকভাবে দিন।\n"
+                "**উদাহরণ:**\n"
+                "`+8801712345678, +8801812345678, 01712345678`"
             )
             return
         
         # Limit check
-        if len(phone_list) > 100:
+        if len(phone_list) > 50:
             await message.reply_text(
                 f"⚠️ **লিমিট এক্সিড!**\n"
                 f"আপনি {len(phone_list)} টি নাম্বার দিয়েছেন।\n"
-                f"একবারে সর্বোচ্চ 100 টি নাম্বার চেক করা যায়।\n\n"
-                f"প্রথম 100 টি নাম্বার চেক করা হচ্ছে..."
+                f"একবারে সর্বোচ্চ ৫০ টি নাম্বার চেক করা যায়।\n\n"
+                f"প্রথম ৫০ টি নাম্বার চেক করা হচ্ছে..."
             )
-            phone_list = phone_list[:100]
+            phone_list = phone_list[:50]
         
-        # Start checking
+        # Start checking process
         processing_msg = await message.reply_text(
-            f"🔍 **নাম্বার চেক করা হচ্ছে...**\n"
-            f"মোট নাম্বার: {len(phone_list)} টি\n\n"
-            f"⏳ প্রস্তুত হচ্ছে...\n\n"
-            f"**স্থিতি:** API ব্যবহার করা হচ্ছে"
+            f"🔍 **নাম্বার চেক শুরু হয়েছে...**\n\n"
+            f"📱 **মোট নাম্বার:** {len(phone_list)} টি\n"
+            f"⏳ **স্থিতি:** প্রস্তুত হচ্ছে...\n"
+            f"⚡ **API ব্যবহার:** {api_id[:3]}...{api_id[-3:]}"
         )
         
         try:
             # Check numbers
-            results = await checker.check_bulk(api_id, api_hash, phone_list)
+            results = await checker.check_numbers(api_id, api_hash, phone_list)
             
             # Format results
             results_text = format_results(results)
             
-            # Add contact button
-            contact_button = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Contact Developer 🙎‍♂️", url="https://t.me/Mr_Evan3490")
-            ]])
-            
-            # Send final results
+            # Send final results with contact button
             await processing_msg.edit_text(
                 f"✅ **চেকিং সম্পন্ন!**\n\n{results_text}",
-                reply_markup=contact_button
+                reply_markup=create_contact_button()
             )
             
-            # Keep user ready for more checks
-            user_states[user_id]["step"] = "ready_for_numbers"
+            # Keep user in ready state for more checks
+            session["step"] = "ready_for_numbers"
             
         except Exception as e:
             error_msg = str(e).lower()
             
-            # Check if credentials are invalid
-            if "api_id" in error_msg or "auth" in error_msg or "invalid" in error_msg:
+            # Check if credentials became invalid
+            if any(word in error_msg for word in ["api_id", "auth", "invalid", "unauthorized"]):
                 await processing_msg.edit_text(
                     "❌ **আপনার API Credentials অচল বা নষ্ট হয়ে গেছে!**\n\n"
-                    "দয়া করে নতুন API credentials দিয়ে শুরু করুন:\n\n"
+                    "সম্ভাব্য কারণ:\n"
+                    "• API credentials expire হয়ে গেছে\n"
+                    "• Telegram থেকে ban হয়েছে\n"
+                    "• Very old credentials\n\n"
+                    "👉 **নতুন API credentials দিয়ে শুরু করুন:**\n"
                     "আপনার **API_ID** দিন:"
                 )
-                user_states[user_id] = {"step": "waiting_api_id"}
+                session["step"] = "waiting_api_id"
+                session["api_id"] = None
+                session["api_hash"] = None
             else:
                 await processing_msg.edit_text(
                     f"❌ **ত্রুটি হয়েছে!**\n\n"
-                    f"ত্রুটি: `{str(e)[:150]}`\n\n"
-                    f"দয়া করে আবার চেষ্টা করুন।"
+                    f"**ত্রুটি:** `{str(e)[:100]}`\n\n"
+                    f"দয়া করে আবার চেষ্টা করুন বা Developer কে contact করুন।",
+                    reply_markup=create_contact_button()
                 )
     
     # Unknown state
     else:
         await message.reply_text(
             "🤖 **বটটি শুরু করুন** /start লিখে\n\n"
-            "বা সাহায্যের জন্য /help লিখুন।"
+            "সাহায্যের জন্য /help লিখুন।",
+            reply_markup=create_contact_button()
         )
 
-# Help command
-@app.on_message(filters.command("help"))
-async def help_handler(client: Client, message: Message):
-    help_text = (
-        "🆘 **Telegram Number Checker Bot - Help**\n\n"
-        "**কমান্ডস:**\n"
-        "• /start - শুরু করুন\n"
-        "• /help - এই সাহায্য মেনু\n"
-        "• /new - নতুন API credentials দিয়ে শুরু করুন\n\n"
-        "**কিভাবে API credentials পাবেন:**\n"
-        "1. https://my.telegram.org/apps এ যান\n"
-        "2. লগইন করুন\n"
-        "3. **API Development Tools** এ ক্লিক করুন\n"
-        "4. **App title** এবং **Short name** দিন\n"
-        "5. **App ID** (API_ID) এবং **App Hash** (API_HASH) পাবেন\n\n"
-        "**নাম্বার ফরম্যাট:**\n"
-        "• `+8801712345678` (পূর্ণ ফরম্যাট)\n"
-        "• `8801712345678`\n"
-        "• `01712345678` (বাংলাদেশের জন্য)\n\n"
-        "**সমস্যা হলে Contact করুন:**"
-    )
-    
-    contact_button = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Contact Developer 🙎‍♂️", url="https://t.me/Mr_Evan3490")
-    ]])
-    
-    await message.reply_text(help_text, reply_markup=contact_button)
+# ==================== BOT STARTUP ====================
 
-# New command - restart with new credentials
-@app.on_message(filters.command("new"))
-async def new_handler(client: Client, message: Message):
-    user_id = message.from_user.id
-    user_states[user_id] = {"step": "waiting_api_id"}
-    
-    await message.reply_text(
-        "🔄 **নতুন API credentials দিয়ে শুরু করুন**\n\n"
-        "আপনার **API_ID** দিন (6-7 ডিজিটের সংখ্যা):"
-    )
+print("=" * 60)
+print("🤖 TELEGRAM NUMBER CHECKER BOT")
+print("=" * 60)
+print(f"👤 Bot API ID: {Config.API_ID}")
+print(f"🔑 Bot Token: {Config.BOT_TOKEN[:15]}...")
+print("=" * 60)
+print("\n🚀 Starting bot...")
+print("✅ Bot is running! Press Ctrl+C to stop")
+print("=" * 60)
 
-# Cleanup on stop
-@app.on_raw_update()
-async def cleanup():
-    checker.cleanup()
-
-# Run bot
 if __name__ == "__main__":
-    print("=" * 50)
-    print("🤖 Telegram Number Checker Bot")
-    print("=" * 50)
-    print("\n⚙️  Bot Configuration:")
-    print(f"• Token: {'Set' if BOT_TOKEN else 'NOT SET!'}")
-    print("\n🚀 Starting bot...")
-    print("Press Ctrl+C to stop\n")
-    
     try:
-        app.run()
+        bot.run()
     except KeyboardInterrupt:
         print("\n👋 Bot stopped by user")
     except Exception as e:
-        print(f"❌ Error: {e}")
-    finally:
-        checker.cleanup()
-        print("🧹 Cleanup completed")
+        print(f"❌ Fatal error: {e}")
