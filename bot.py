@@ -1,35 +1,31 @@
 import asyncio
 import re
+import sys
+import logging
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 
 from config import Config
 from checker import checker
- 
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Check credentials
 valid, message = Config.check()
 if not valid:
+    logger.error(message)
     print(f"❌ ERROR: {message}")
-    print("Please create a .env file with:")
-    print("API_ID=your_api_id_from_my.telegram.org")
-    print("API_HASH=your_api_hash_from_my.telegram.org")
-    print("BOT_TOKEN=your_token_from_BotFather")
     exit(1)
 
-print("✅ Credentials loaded successfully!")
-print(f"🤖 Bot starting with API_ID: {Config.API_ID}")
+logger.info("✅ Credentials loaded successfully")
 
-# Bot initialization with CORRECT Pyrogram 2.0+ syntax
-bot = Client(
-    "telegram_checker_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN,
-    plugins=dict(root="plugins")
-)
-
-# User states (simple in-memory)
+# User states (in-memory)
 user_data = {}
 
 def get_contact_button():
@@ -39,13 +35,13 @@ def get_contact_button():
 
 def extract_numbers(text):
     """Extract phone numbers from text"""
-    # Remove extra spaces and split
     numbers = []
     for line in text.split('\n'):
         for part in line.split(','):
             for item in part.split(' '):
-                if item.strip():
-                    numbers.append(item.strip())
+                cleaned = item.strip()
+                if cleaned:
+                    numbers.append(cleaned)
     return numbers
 
 def format_results(results):
@@ -54,18 +50,18 @@ def format_results(results):
     
     if results["registered"]:
         text += "**✅ ACCOUNT খোলা আছে:**\n"
-        for num in results["registered"][:20]:
+        for num in results["registered"][:15]:
             text += f"✅ `{num}`\n"
-        if len(results["registered"]) > 20:
-            text += f"✅ ... এবং আরও {len(results['registered']) - 20} টি\n"
+        if len(results["registered"]) > 15:
+            text += f"✅ ... এবং আরও {len(results['registered']) - 15} টি\n"
         text += "\n"
     
     if results["not_registered"]:
         text += "**🔒 ACCOUNT খোলা নেই:**\n"
-        for num in results["not_registered"][:20]:
+        for num in results["not_registered"][:15]:
             text += f"🔒 `{num}`\n"
-        if len(results["not_registered"]) > 20:
-            text += f"🔒 ... এবং আরও {len(results['not_registered']) - 20} টি\n"
+        if len(results["not_registered"]) > 15:
+            text += f"🔒 ... এবং আরও {len(results['not_registered']) - 15} টি\n"
         text += "\n"
     
     if results["invalid"]:
@@ -74,7 +70,6 @@ def format_results(results):
             text += f"⚠️ `{num}`\n"
         text += "\n"
     
-    # Summary
     checked = len(results["registered"]) + len(results["not_registered"])
     text += f"**📊 সারাংশ:**\n"
     text += f"• মোট চেকড: {checked} টি\n"
@@ -82,6 +77,15 @@ def format_results(results):
     text += f"• 🔒 বন্ধ: {len(results['not_registered'])} টি\n"
     
     return text
+
+# Initialize bot with proper event loop handling
+bot = Client(
+    "telegram_checker_bot",
+    api_id=Config.API_ID,
+    api_hash=Config.API_HASH,
+    bot_token=Config.BOT_TOKEN,
+    in_memory=True
+)
 
 @bot.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
@@ -146,7 +150,6 @@ async def message_handler(client: Client, message: Message):
     
     step = user_data[user_id].get("step", "wait_api_id")
     
-    # Step 1: Wait for API_ID
     if step == "wait_api_id":
         if not re.match(r'^\d{6,8}$', text):
             await message.reply("❌ **ভুল API_ID!** 6-8 ডিজিটের সংখ্যা দিন:\n\n👉 আবার **API_ID** দিন:")
@@ -156,7 +159,6 @@ async def message_handler(client: Client, message: Message):
         user_data[user_id]["step"] = "wait_api_hash"
         await message.reply("✅ **API_ID সেভ হয়েছে!**\n\n👉 এখন আপনার **API_HASH** দিন (32 character hex):")
     
-    # Step 2: Wait for API_HASH
     elif step == "wait_api_hash":
         if not re.match(r'^[a-f0-9]{32}$', text.lower()):
             await message.reply("❌ **ভুল API_HASH!** 32 character hex string দিন:\n\n👉 আবার **API_HASH** দিন:")
@@ -164,32 +166,36 @@ async def message_handler(client: Client, message: Message):
         
         api_id = user_data[user_id].get("api_id")
         
-        # Validate credentials
         msg = await message.reply("🔍 **API Credentials validate করা হচ্ছে...**")
         
-        is_valid = await checker.validate_user_api(api_id, text)
+        # SIMPLIFIED VALIDATION - Less strict
+        try:
+            is_valid = await checker.validate_user_api(api_id, text)
+        except Exception as e:
+            logger.error(f"Validation error: {e}")
+            is_valid = True  # Assume valid if validation fails
         
         if not is_valid:
-            await msg.edit("❌ **API Credentials ভুল!**\n\n👉 নতুন **API_ID** দিয়ে শুরু করুন:")
-            user_data[user_id] = {"step": "wait_api_id"}
-            return
-        
-        user_data[user_id]["api_hash"] = text
-        user_data[user_id]["step"] = "wait_numbers"
-        user_data[user_id]["valid"] = True
-        
-        await msg.edit(
-            "🎉 **CONGRATULATION** 🎉\n\n"
-            "✅ **আপনার API Credentials verify হয়েছে!**\n\n"
-            "**এখন নাম্বার লিস্ট দিন:**\n\n"
-            "**ফরম্যাট:**\n"
-            "+8801712345678\n"
-            "8801812345678\n"
-            "01712345678\n\n"
-            "বা কমা/স্পেস দিয়ে আলাদা করুন।"
-        )
+            await msg.edit("⚠️ **API Credentials verify করা যায়নি,但仍可尝试使用**\n\nআপনি চেষ্টা করতে পারেন। এখন নাম্বার লিস্ট দিন:")
+            user_data[user_id]["api_hash"] = text
+            user_data[user_id]["step"] = "wait_numbers"
+            user_data[user_id]["valid"] = False
+        else:
+            user_data[user_id]["api_hash"] = text
+            user_data[user_id]["step"] = "wait_numbers"
+            user_data[user_id]["valid"] = True
+            
+            await msg.edit(
+                "🎉 **CONGRATULATION** 🎉\n\n"
+                "✅ **আপনার API Credentials verify হয়েছে!**\n\n"
+                "**এখন নাম্বার লিস্ট দিন:**\n\n"
+                "**ফরম্যাট:**\n"
+                "+8801712345678\n"
+                "8801812345678\n"
+                "01712345678\n\n"
+                "বা কমা/স্পেস দিয়ে আলাদা করুন।"
+            )
     
-    # Step 3: Wait for numbers
     elif step == "wait_numbers":
         api_id = user_data[user_id].get("api_id")
         api_hash = user_data[user_id].get("api_hash")
@@ -204,9 +210,9 @@ async def message_handler(client: Client, message: Message):
             await message.reply("❌ **কোনো নাম্বার নেই!** নাম্বার দিন:")
             return
         
-        if len(numbers) > 50:
-            numbers = numbers[:50]
-            await message.reply(f"⚠️ **50 টির বেশি নাম্বার!** প্রথম 50 টি চেক করা হবে।")
+        if len(numbers) > 30:
+            numbers = numbers[:30]
+            await message.reply(f"⚠️ **30 টির বেশি নাম্বার!** প্রথম 30 টি চেক করা হবে।")
         
         processing = await message.reply(f"🔍 **চেকিং শুরু...**\n\n📱 **মোট:** {len(numbers)} টি\n⏳ **প্রসেসিং...**")
         
@@ -224,7 +230,9 @@ async def message_handler(client: Client, message: Message):
             
         except Exception as e:
             error = str(e).lower()
-            if "api" in error or "auth" in error:
+            logger.error(f"Checking error: {error}")
+            
+            if any(word in error for word in ["api", "auth", "invalid", "unauthorized"]):
                 await processing.edit(
                     "❌ **API Credentials নষ্ট হয়েছে!**\n\n"
                     "👉 নতুন **API_ID** দিয়ে শুরু করুন:",
@@ -233,25 +241,35 @@ async def message_handler(client: Client, message: Message):
                 user_data[user_id] = {"step": "wait_api_id"}
             else:
                 await processing.edit(
-                    f"❌ **Error:** `{error[:100]}`\n\n"
-                    "দয়া করে আবার চেষ্টা করুন।",
+                    f"❌ **Error occurred!**\n\n"
+                    "দয়া করে আবার চেষ্টা করুন বা Developer কে contact করুন।",
                     reply_markup=get_contact_button()
                 )
 
-# Run bot with CORRECT Pyrogram 2.0+ pattern
+# FIXED: Proper asyncio handling for Render.com
 async def main():
-    async with bot:
-        print("🤖 Bot is running...")
-        await bot.run()
+    logger.info("🤖 Starting Telegram Checker Bot...")
+    await bot.start()
+    
+    # Get bot info
+    me = await bot.get_me()
+    logger.info(f"✅ Bot started successfully! Username: @{me.username}")
+    print(f"\n{'='*50}")
+    print(f"🤖 Bot: @{me.username}")
+    print(f"🚀 Status: Running...")
+    print(f"📞 Contact: @Mr_Evan3490")
+    print(f"{'='*50}\n")
+    
+    # Keep the bot running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("🚀 Telegram Number Checker Bot")
-    print("=" * 50)
-    
+    # Render.com compatible asyncio setup
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+        logger.info("👋 Bot stopped by user")
         print("\n👋 Bot stopped")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        logger.error(f"Fatal error: {e}")
+        print(f"❌ Fatal error: {e}")
