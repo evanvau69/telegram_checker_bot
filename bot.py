@@ -2,6 +2,7 @@ import asyncio
 import re
 import sys
 import logging
+from aiohttp import web
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -78,7 +79,7 @@ def format_results(results):
     
     return text
 
-# Initialize bot with proper event loop handling
+# Initialize bot
 bot = Client(
     "telegram_checker_bot",
     api_id=Config.API_ID,
@@ -87,6 +88,30 @@ bot = Client(
     in_memory=True
 )
 
+# ==================== HTTP SERVER FOR RENDER.COM ====================
+async def health_check(request):
+    """Health check endpoint for Render.com"""
+    return web.Response(text="✅ Telegram Bot is running")
+
+async def start_http_server():
+    """Start HTTP server for health checks"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Get port from environment (Render provides $PORT)
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    
+    await site.start()
+    logger.info(f"🌐 HTTP server started on port {port}")
+    print(f"🌐 Health check: http://0.0.0.0:{port}/health")
+
+# ==================== TELEGRAM HANDLERS ====================
 @bot.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
@@ -168,12 +193,12 @@ async def message_handler(client: Client, message: Message):
         
         msg = await message.reply("🔍 **API Credentials validate করা হচ্ছে...**")
         
-        # SIMPLIFIED VALIDATION - Less strict
+        # SIMPLIFIED VALIDATION
         try:
             is_valid = await checker.validate_user_api(api_id, text)
         except Exception as e:
             logger.error(f"Validation error: {e}")
-            is_valid = True  # Assume valid if validation fails
+            is_valid = True  # Assume valid
         
         if not is_valid:
             await msg.edit("⚠️ **API Credentials verify করা যায়নি,但仍可尝试使用**\n\nআপনি চেষ্টা করতে পারেন। এখন নাম্বার লিস্ট দিন:")
@@ -246,25 +271,46 @@ async def message_handler(client: Client, message: Message):
                     reply_markup=get_contact_button()
                 )
 
-# FIXED: Proper asyncio handling for Render.com
+# ==================== MAIN FUNCTION ====================
 async def main():
-    logger.info("🤖 Starting Telegram Checker Bot...")
+    """Main function to run both HTTP server and Telegram bot"""
+    
+    # Start HTTP server for Render.com health checks
+    http_task = asyncio.create_task(start_http_server())
+    
+    # Start Telegram bot
+    logger.info("🤖 Starting Telegram Bot...")
     await bot.start()
     
     # Get bot info
     me = await bot.get_me()
     logger.info(f"✅ Bot started successfully! Username: @{me.username}")
-    print(f"\n{'='*50}")
+    print(f"\n{'='*60}")
     print(f"🤖 Bot: @{me.username}")
+    print(f"🌐 Health: http://0.0.0.0:8080/health")
     print(f"🚀 Status: Running...")
     print(f"📞 Contact: @Mr_Evan3490")
-    print(f"{'='*50}\n")
+    print(f"{'='*60}\n")
     
-    # Keep the bot running
-    await asyncio.Event().wait()
+    # Keep both running
+    await asyncio.gather(
+        http_task,
+        bot.run()
+    )
 
 if __name__ == "__main__":
-    # Render.com compatible asyncio setup
+    import os
+    import signal
+    
+    # Handle shutdown signals
+    def shutdown_handler(signum, frame):
+        print("\n👋 Shutting down...")
+        asyncio.create_task(bot.stop())
+        exit(0)
+    
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
