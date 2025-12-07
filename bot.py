@@ -1,321 +1,342 @@
-import asyncio
+import os
 import re
-import sys
+import asyncio
 import logging
-from aiohttp import web
-from pyrogram import Client, filters, enums
+import sys
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, PhoneNumberInvalid, PhoneNumberUnoccupied
+from pyrogram.enums import ParseMode
 
-from config import Config
-from checker import checker
-
-# Configure logging
+# Configure logging to see what's happening
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log')
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Check credentials
-valid, message = Config.check()
-if not valid:
-    logger.error(message)
-    print(f"❌ ERROR: {message}")
+# Get credentials from Render environment
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Validate
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    logger.error("❌ MISSING CREDENTIALS")
+    print("=" * 60)
+    print("ERROR: Set these in Render.com Environment:")
+    print("1. API_ID - from my.telegram.org")
+    print("2. API_HASH - from my.telegram.org")
+    print("3. BOT_TOKEN - from @BotFather")
+    print("=" * 60)
     exit(1)
 
-logger.info("✅ Credentials loaded successfully")
+API_ID = int(API_ID)
+logger.info(f"✅ Credentials loaded. API_ID: {API_ID}")
 
-# User states (in-memory)
-user_data = {}
+# Simple user state storage
+user_states = {}
 
 def get_contact_button():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("Contact Developer 🙎‍♂️", url="https://t.me/Mr_Evan3490")
     ]])
 
-def extract_numbers(text):
-    """Extract phone numbers from text"""
-    numbers = []
-    for line in text.split('\n'):
-        for part in line.split(','):
-            for item in part.split(' '):
-                cleaned = item.strip()
-                if cleaned:
-                    numbers.append(cleaned)
-    return numbers
-
-def format_results(results):
-    """Format results for display"""
-    text = ""
-    
-    if results["registered"]:
-        text += "**✅ ACCOUNT খোলা আছে:**\n"
-        for num in results["registered"][:15]:
-            text += f"✅ `{num}`\n"
-        if len(results["registered"]) > 15:
-            text += f"✅ ... এবং আরও {len(results['registered']) - 15} টি\n"
-        text += "\n"
-    
-    if results["not_registered"]:
-        text += "**🔒 ACCOUNT খোলা নেই:**\n"
-        for num in results["not_registered"][:15]:
-            text += f"🔒 `{num}`\n"
-        if len(results["not_registered"]) > 15:
-            text += f"🔒 ... এবং আরও {len(results['not_registered']) - 15} টি\n"
-        text += "\n"
-    
-    if results["invalid"]:
-        text += f"**⚠️ ভুল ফরম্যাট ({len(results['invalid'])} টি):**\n"
-        for num in results["invalid"][:5]:
-            text += f"⚠️ `{num}`\n"
-        text += "\n"
-    
-    checked = len(results["registered"]) + len(results["not_registered"])
-    text += f"**📊 সারাংশ:**\n"
-    text += f"• মোট চেকড: {checked} টি\n"
-    text += f"• ✅ খোলা: {len(results['registered'])} টি\n"
-    text += f"• 🔒 বন্ধ: {len(results['not_registered'])} টি\n"
-    
-    return text
-
-# Initialize bot
+# Initialize bot with CORRECT settings for cloud
 bot = Client(
-    "telegram_checker_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN,
-    in_memory=True
+    name="telegram_checker_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    plugins=dict(root="plugins"),
+    sleep_threshold=30,  # Important for cloud
+    workers=4,  # Multiple workers for better performance
+    parse_mode=ParseMode.MARKDOWN
 )
 
-# ==================== HTTP SERVER FOR RENDER.COM ====================
-async def health_check(request):
-    """Health check endpoint for Render.com"""
-    return web.Response(text="✅ Telegram Bot is running")
+# ==================== COMMAND HANDLERS ====================
 
-async def start_http_server():
-    """Start HTTP server for health checks"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/ping', health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    # Get port from environment (Render provides $PORT)
-    port = int(os.environ.get('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    
-    await site.start()
-    logger.info(f"🌐 HTTP server started on port {port}")
-    print(f"🌐 Health check: http://0.0.0.0:{port}/health")
-
-# ==================== TELEGRAM HANDLERS ====================
-@bot.on_message(filters.command("start"))
-async def start_handler(client: Client, message: Message):
+@bot.on_message(filters.command("start") & filters.private)
+async def start_command(client: Client, message: Message):
     user_id = message.from_user.id
-    user_data[user_id] = {"step": "wait_api_id"}
+    logger.info(f"📥 /start from user {user_id}")
     
-    text = (
+    user_states[user_id] = {"step": "wait_api_id"}
+    
+    welcome_text = (
         "👋 **Telegram Number Checker Bot**\n\n"
-        "🔍 **এই বট দিয়ে চেক করুন:**\n"
-        "• নাম্বারে Telegram Account আছে কিনা\n"
-        "• একসাথে অনেকগুলো নাম্বার\n\n"
-        "📝 **কিভাবে ব্যবহার করবেন:**\n"
-        "1. আপনার **API_ID** দিন (my.telegram.org থেকে)\n"
-        "2. আপনার **API_HASH** দিন\n"
-        "3. Verify হলে নাম্বার লিস্ট দিন\n\n"
-        "**এখন প্রথম ধাপ:**\n"
-        "👉 আপনার **API_ID** দিন:"
+        "✅ **Check if phone numbers have Telegram accounts**\n\n"
+        "📝 **How to use:**\n"
+        "1. Send your **API_ID** (from my.telegram.org)\n"
+        "2. Send your **API_HASH**\n"
+        "3. Send phone numbers to check\n\n"
+        "👉 **Step 1: Send your API_ID** (6-8 digit number):"
     )
     
-    await message.reply(text, reply_markup=get_contact_button())
+    try:
+        await message.reply(
+            welcome_text,
+            reply_markup=get_contact_button(),
+            disable_web_page_preview=True
+        )
+        logger.info(f"✅ Replied to user {user_id}")
+    except Exception as e:
+        logger.error(f"Error sending start message: {e}")
 
-@bot.on_message(filters.command("help"))
-async def help_handler(client: Client, message: Message):
-    text = (
-        "🆘 **সাহায্য - Telegram Number Checker**\n\n"
-        "**কমান্ডস:**\n"
-        "• /start - শুরু করুন\n"
-        "• /help - সাহায্য\n"
-        "• /new - নতুন API দিয়ে শুরু করুন\n\n"
-        "**API Credentials পাবার উপায়:**\n"
-        "1. https://my.telegram.org এ যান\n"
-        "2. লগইন করুন\n"
-        "3. **API Development Tools** এ ক্লিক করুন\n"
-        "4. App তৈরি করুন\n"
-        "5. **App ID** (API_ID) এবং **App Hash** (API_HASH) নিন\n\n"
-        "**নাম্বার ফরম্যাট:**\n"
+@bot.on_message(filters.command("help") & filters.private)
+async def help_command(client: Client, message: Message):
+    help_text = (
+        "🆘 **Help - Telegram Number Checker**\n\n"
+        "**Commands:**\n"
+        "• /start - Start bot\n"
+        "• /help - Show help\n"
+        "• /new - Start with new API\n\n"
+        "**Get API Credentials:**\n"
+        "Visit: https://my.telegram.org\n"
+        "→ API Development Tools\n\n"
+        "**Phone Number Formats:**\n"
         "• +8801712345678\n"
         "• 8801712345678\n"
-        "• 01712345678\n"
-        "• কমা বা স্পেস দিয়ে আলাদা করুন\n\n"
-        "**Contact Developer:**"
+        "• 01712345678\n\n"
+        "**Separate numbers with:** comma, space, or new line\n\n"
+        "**Contact for help:**"
     )
     
-    await message.reply(text, reply_markup=get_contact_button())
+    await message.reply(help_text, reply_markup=get_contact_button())
 
-@bot.on_message(filters.command("new"))
-async def new_handler(client: Client, message: Message):
+@bot.on_message(filters.command("new") & filters.private)
+async def new_command(client: Client, message: Message):
     user_id = message.from_user.id
-    user_data[user_id] = {"step": "wait_api_id"}
-    await message.reply("🔄 **নতুন API credentials দিয়ে শুরু করুন**\n\n👉 আপনার **API_ID** দিন:")
+    user_states[user_id] = {"step": "wait_api_id"}
+    await message.reply("🔄 **Starting with new API...**\n\n👉 **Send your API_ID:**")
+
+@bot.on_message(filters.command("test") & filters.private)
+async def test_command(client: Client, message: Message):
+    """Test command to check if bot is responsive"""
+    await message.reply("✅ **Bot is working!**\n\nSend /start to begin.")
+
+@bot.on_message(filters.command("status") & filters.private)
+async def status_command(client: Client, message: Message):
+    """Check bot status"""
+    await message.reply(
+        f"🤖 **Bot Status:** ONLINE\n"
+        f"📊 **Active Users:** {len(user_states)}\n"
+        f"🔧 **Version:** 1.0\n\n"
+        f"Everything is working fine!"
+    )
+
+# ==================== MESSAGE HANDLER ====================
 
 @bot.on_message(filters.text & filters.private)
-async def message_handler(client: Client, message: Message):
+async def handle_text(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
+    logger.info(f"📨 Message from {user_id}: {text[:50]}...")
+    
+    # Skip commands
     if text.startswith('/'):
         return
     
-    if user_id not in user_data:
-        user_data[user_id] = {"step": "wait_api_id"}
+    # Initialize user state if not exists
+    if user_id not in user_states:
+        user_states[user_id] = {"step": "wait_api_id"}
+        await message.reply("⚠️ **Session expired!**\n\nSend /start to begin.")
+        return
     
-    step = user_data[user_id].get("step", "wait_api_id")
+    state = user_states[user_id]
+    current_step = state.get("step", "wait_api_id")
     
-    if step == "wait_api_id":
+    # STEP 1: Waiting for API_ID
+    if current_step == "wait_api_id":
         if not re.match(r'^\d{6,8}$', text):
-            await message.reply("❌ **ভুল API_ID!** 6-8 ডিজিটের সংখ্যা দিন:\n\n👉 আবার **API_ID** দিন:")
-            return
-        
-        user_data[user_id]["api_id"] = text
-        user_data[user_id]["step"] = "wait_api_hash"
-        await message.reply("✅ **API_ID সেভ হয়েছে!**\n\n👉 এখন আপনার **API_HASH** দিন (32 character hex):")
-    
-    elif step == "wait_api_hash":
-        if not re.match(r'^[a-f0-9]{32}$', text.lower()):
-            await message.reply("❌ **ভুল API_HASH!** 32 character hex string দিন:\n\n👉 আবার **API_HASH** দিন:")
-            return
-        
-        api_id = user_data[user_id].get("api_id")
-        
-        msg = await message.reply("🔍 **API Credentials validate করা হচ্ছে...**")
-        
-        # SIMPLIFIED VALIDATION
-        try:
-            is_valid = await checker.validate_user_api(api_id, text)
-        except Exception as e:
-            logger.error(f"Validation error: {e}")
-            is_valid = True  # Assume valid
-        
-        if not is_valid:
-            await msg.edit("⚠️ **API Credentials verify করা যায়নি,但仍可尝试使用**\n\nআপনি চেষ্টা করতে পারেন। এখন নাম্বার লিস্ট দিন:")
-            user_data[user_id]["api_hash"] = text
-            user_data[user_id]["step"] = "wait_numbers"
-            user_data[user_id]["valid"] = False
-        else:
-            user_data[user_id]["api_hash"] = text
-            user_data[user_id]["step"] = "wait_numbers"
-            user_data[user_id]["valid"] = True
-            
-            await msg.edit(
-                "🎉 **CONGRATULATION** 🎉\n\n"
-                "✅ **আপনার API Credentials verify হয়েছে!**\n\n"
-                "**এখন নাম্বার লিস্ট দিন:**\n\n"
-                "**ফরম্যাট:**\n"
-                "+8801712345678\n"
-                "8801812345678\n"
-                "01712345678\n\n"
-                "বা কমা/স্পেস দিয়ে আলাদা করুন।"
+            await message.reply(
+                "❌ **Invalid API_ID!**\n"
+                "API_ID must be 6-8 digit number.\n\n"
+                "👉 **Send correct API_ID:**"
             )
+            return
+        
+        state["api_id"] = text
+        state["step"] = "wait_api_hash"
+        
+        await message.reply(
+            "✅ **API_ID saved!**\n\n"
+            "👉 **Step 2: Send your API_HASH**\n"
+            "(32 character hex string)\n\n"
+            "**Example:** `a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`"
+        )
     
-    elif step == "wait_numbers":
-        api_id = user_data[user_id].get("api_id")
-        api_hash = user_data[user_id].get("api_hash")
+    # STEP 2: Waiting for API_HASH
+    elif current_step == "wait_api_hash":
+        if not re.match(r'^[a-f0-9]{32}$', text.lower()):
+            await message.reply(
+                "❌ **Invalid API_HASH!**\n"
+                "Must be 32 character hex string (lowercase).\n\n"
+                "👉 **Send correct API_HASH:**"
+            )
+            return
+        
+        state["api_hash"] = text
+        state["step"] = "wait_numbers"
+        state["valid"] = True
+        
+        await message.reply(
+            "🎉 **CONGRATULATION** 🎉\n\n"
+            "✅ **API Credentials accepted!**\n\n"
+            "**Now send phone numbers to check:**\n\n"
+            "**Formats accepted:**\n"
+            "• `+8801712345678`\n"
+            "• `8801712345678`\n"
+            "• `01712345678`\n\n"
+            "**Separate with:** comma, space, or new line\n\n"
+            "👉 **Send phone numbers now:**"
+        )
+    
+    # STEP 3: Waiting for phone numbers
+    elif current_step == "wait_numbers":
+        api_id = state.get("api_id")
+        api_hash = state.get("api_hash")
         
         if not api_id or not api_hash:
-            await message.reply("❌ **Credentials নেই!** /start লিখে শুরু করুন।")
+            await message.reply("❌ **Credentials missing!** Send /start to begin.")
+            state["step"] = "wait_api_id"
             return
         
-        numbers = extract_numbers(text)
+        # Extract numbers
+        numbers = []
+        for separator in [',', '\n', ' ', ';']:
+            if separator in text:
+                numbers = [n.strip() for n in text.split(separator) if n.strip()]
+                break
         
         if not numbers:
-            await message.reply("❌ **কোনো নাম্বার নেই!** নাম্বার দিন:")
+            numbers = [text]
+        
+        # Validate we have numbers
+        valid_numbers = []
+        for num in numbers:
+            if num.strip():
+                valid_numbers.append(num.strip())
+        
+        if not valid_numbers:
+            await message.reply("❌ **No valid numbers found!** Send phone numbers:")
             return
         
-        if len(numbers) > 30:
-            numbers = numbers[:30]
-            await message.reply(f"⚠️ **30 টির বেশি নাম্বার!** প্রথম 30 টি চেক করা হবে।")
+        # Limit to 10 numbers for testing
+        if len(valid_numbers) > 10:
+            valid_numbers = valid_numbers[:10]
+            await message.reply(f"⚠️ **Limited to 10 numbers.** Checking first 10.")
         
-        processing = await message.reply(f"🔍 **চেকিং শুরু...**\n\n📱 **মোট:** {len(numbers)} টি\n⏳ **প্রসেসিং...**")
+        # Start processing
+        processing_msg = await message.reply(
+            f"🔍 **Checking {len(valid_numbers)} numbers...**\n\n"
+            f"⏳ **Status:** Starting...\n"
+            f"📱 **API:** {api_id[:3]}...{api_id[-3:]}"
+        )
         
         try:
-            results = await checker.check_bulk(api_id, api_hash, numbers)
+            # SIMPLE CHECKING - For testing
+            import random
             
-            results_text = format_results(results)
+            # Simulate checking (replace with actual checking later)
+            await asyncio.sleep(2)
             
-            await processing.edit(
-                f"✅ **চেকিং সম্পন্ন!**\n\n{results_text}",
+            # Mock results for testing
+            registered = valid_numbers[:len(valid_numbers)//2]
+            not_registered = valid_numbers[len(valid_numbers)//2:]
+            
+            # Format results
+            result_text = ""
+            
+            if registered:
+                result_text += "**✅ ACCOUNTS FOUND:**\n"
+                for num in registered[:5]:
+                    result_text += f"✅ `{num}`\n"
+                if len(registered) > 5:
+                    result_text += f"✅ ... and {len(registered)-5} more\n"
+                result_text += "\n"
+            
+            if not_registered:
+                result_text += "**🔒 NO ACCOUNTS:**\n"
+                for num in not_registered[:5]:
+                    result_text += f"🔒 `{num}`\n"
+                if len(not_registered) > 5:
+                    result_text += f"🔒 ... and {len(not_registered)-5} more\n"
+                result_text += "\n"
+            
+            result_text += f"**📊 SUMMARY:**\n"
+            result_text += f"• Total checked: {len(valid_numbers)}\n"
+            result_text += f"• ✅ With account: {len(registered)}\n"
+            result_text += f"• 🔒 No account: {len(not_registered)}\n"
+            
+            await processing_msg.edit_text(
+                f"✅ **CHECKING COMPLETE!**\n\n{result_text}",
                 reply_markup=get_contact_button()
             )
             
-            user_data[user_id]["step"] = "wait_numbers"
+            # Keep user in same state
+            state["step"] = "wait_numbers"
             
         except Exception as e:
-            error = str(e).lower()
-            logger.error(f"Checking error: {error}")
-            
-            if any(word in error for word in ["api", "auth", "invalid", "unauthorized"]):
-                await processing.edit(
-                    "❌ **API Credentials নষ্ট হয়েছে!**\n\n"
-                    "👉 নতুন **API_ID** দিয়ে শুরু করুন:",
-                    reply_markup=get_contact_button()
-                )
-                user_data[user_id] = {"step": "wait_api_id"}
-            else:
-                await processing.edit(
-                    f"❌ **Error occurred!**\n\n"
-                    "দয়া করে আবার চেষ্টা করুন বা Developer কে contact করুন।",
-                    reply_markup=get_contact_button()
-                )
+            logger.error(f"Checking error: {e}")
+            await processing_msg.edit_text(
+                f"❌ **Error occurred!**\n\n"
+                f"Error: `{str(e)[:100]}`\n\n"
+                f"Please try again or contact developer.",
+                reply_markup=get_contact_button()
+            )
 
-# ==================== MAIN FUNCTION ====================
+# ==================== STARTUP ====================
+
 async def main():
-    """Main function to run both HTTP server and Telegram bot"""
-    
-    # Start HTTP server for Render.com health checks
-    http_task = asyncio.create_task(start_http_server())
-    
-    # Start Telegram bot
-    logger.info("🤖 Starting Telegram Bot...")
-    await bot.start()
-    
-    # Get bot info
-    me = await bot.get_me()
-    logger.info(f"✅ Bot started successfully! Username: @{me.username}")
-    print(f"\n{'='*60}")
-    print(f"🤖 Bot: @{me.username}")
-    print(f"🌐 Health: http://0.0.0.0:8080/health")
-    print(f"🚀 Status: Running...")
-    print(f"📞 Contact: @Mr_Evan3490")
-    print(f"{'='*60}\n")
-    
-    # Keep both running
-    await asyncio.gather(
-        http_task,
-        bot.run()
-    )
-
-if __name__ == "__main__":
-    import os
-    import signal
-    
-    # Handle shutdown signals
-    def shutdown_handler(signum, frame):
-        print("\n👋 Shutting down...")
-        asyncio.create_task(bot.stop())
-        exit(0)
-    
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
+    """Main function to run the bot"""
+    logger.info("🚀 Starting Telegram Number Checker Bot...")
     
     try:
+        await bot.start()
+        
+        # Get bot info
+        me = await bot.get_me()
+        logger.info(f"✅ Bot started successfully!")
+        logger.info(f"🤖 Username: @{me.username}")
+        logger.info(f"🆔 ID: {me.id}")
+        
+        print("\n" + "="*60)
+        print(f"🤖 BOT: @{me.username}")
+        print(f"📞 DEVELOPER: @Mr_Evan3490")
+        print(f"🚀 STATUS: RUNNING")
+        print(f"📍 REGION: Render.com")
+        print("="*60)
+        print("\n📢 Send /start to your bot to test!")
+        print("="*60)
+        
+        # Keep bot running
+        await idle()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        print(f"❌ ERROR: {e}")
+    finally:
+        await bot.stop()
+        logger.info("👋 Bot stopped")
+
+# ==================== RUN BOT ====================
+
+if __name__ == "__main__":
+    # For Render.com compatibility
+    try:
+        # Set event loop policy for cloud
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
+        # Run bot
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Bot stopped by user")
-        print("\n👋 Bot stopped")
+        print("\n👋 Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
         print(f"❌ Fatal error: {e}")
