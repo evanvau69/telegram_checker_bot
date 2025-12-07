@@ -1,20 +1,31 @@
 import os
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 class Config:
-    # These THREE are required for the BOT itself
+    # Required credentials
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     
-    @staticmethod
-    def check():
-        if not Config.API_ID:
-            return False, "API_ID missing in .env file"
-        if not Config.API_HASH:
-            return False, "API_HASH missing in .env file"
-        if not Config.BOT_TOKEN:
-            return False, "BOT_TOKEN missing in .env file"
-        return True, "All credentials are set"
+    # Bot settings
+    MAX_NUMBERS_PER_REQUEST = 50
+    CHECK_DELAY_SECONDS = 1.5
+    
+    @classmethod
+    def validate(cls):
+        """Validate all required credentials are set"""
+        errors = []
+        
+        if not cls.API_ID or cls.API_ID == 0:
+            errors.append("API_ID is missing or invalid")
+        if not cls.API_HASH:
+            errors.append("API_HASH is missing")
+        if not cls.BOT_TOKEN:
+            errors.append("BOT_TOKEN is missing")
+        
+        if errors:
+            return False, errors
+        return True, "All credentials are valid"
